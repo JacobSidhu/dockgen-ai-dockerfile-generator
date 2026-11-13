@@ -20,6 +20,11 @@ Dockerfile: samples/python-flask/Dockerfile.generated
 
 ## How it works
 
+![DockGen flow: read the project, ask the local model, build, retry on failure, smoke test, log results](assets/dockgen-flow.png)
+
+<details>
+<summary>Same flow as an editable Mermaid diagram</summary>
+
 ```mermaid
 flowchart LR
     A[Project folder] --> B[Build context<br/>language, file tree,<br/>manifest, entry point]
@@ -31,6 +36,8 @@ flowchart LR
     E -- builds --> G[Smoke test<br/>container stays up?]
     G --> H[results.csv]
 ```
+
+</details>
 
 1. **Read the project.** Detect the language from its manifest (`requirements.txt`, `package.json`, `go.mod`, ...), list the files, and read the manifest and the first 60 lines of the entry point, where the port and start command live.
 2. **Ask the model.** Send that context with a system prompt that turns Docker best practices into rules: pinned slim base image, dependencies before source, multi-stage builds for compiled languages, non-root user, correct `EXPOSE` and `CMD`.
