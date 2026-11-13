@@ -6,6 +6,7 @@ fix its own mistakes.
 
 import os
 import re
+import subprocess
 import time
 from pathlib import Path
 
@@ -182,3 +183,94 @@ def extract_dockerfile(reply: str) -> str:
     if match:
         return reply[match.start():].strip() + "\n"
     return reply.strip() + "\n"
+
+
+# --- Docker ------------------------------------------------------------------
+
+def docker(*args: str, timeout: int = 60) -> subprocess.CompletedProcess:
+    """Run a short docker command and capture its output as text."""
+    return subprocess.run(["docker", *args], capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", timeout=timeout)
+
+
+def docker_ready() -> bool:
+    """Check the Docker engine answers, so a broken Docker isn't blamed on the model."""
+    # A frozen engine never replies, so a hang counts as "not ready".
+    try:
+        return docker("info", timeout=20).returncode == 0
+    except subprocess.TimeoutExpired:
+        return False
+
+
+def docker_build(project: Path, dockerfile: Path, tag: str,
+                 timeout: int = 900) -> tuple[bool, str, float]:
+    """Build an image from the given Dockerfile.
+
+    Returns whether the build succeeded, the full build log and the seconds it took.
+    """
+    start = time.time()
+    try:
+        # --progress=plain gives a line-by-line log the model can read, and the
+        # explicit UTF-8 decoding avoids crashes on Windows' default code page.
+        proc = subprocess.run(
+            ["docker", "build", "--progress=plain", "-f", str(dockerfile), "-t", tag, str(project)],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return False, f"docker build timed out after {timeout}s", round(time.time() - start, 1)
+    # BuildKit writes most of its output to stderr.
+    return proc.returncode == 0, proc.stdout + proc.stderr, round(time.time() - start, 1)
+
+
+# --- Generate, build, retry --------------------------------------------------
+
+def last_lines(text: str, n: int = ERROR_TAIL_LINES) -> str:
+    """Return the last n lines of a log, where docker build reports the real error."""
+    return "\n".join(text.splitlines()[-n:])
+
+
+def generate(project: Path, model: str = DEFAULT_MODEL, max_attempts: int = MAX_ATTEMPTS) -> dict:
+    """Ask for a Dockerfile, build it, and feed failures back until it builds.
+
+    The whole exchange stays in one conversation, so on each retry the model
+    sees its previous attempt next to the error it caused. Returns a summary
+    with success, attempts, total model and build seconds, and the image tag.
+    """
+    dockerfile = project / OUTPUT_NAME
+    tag = f"dockgen/{project.resolve().name.lower()}:test"  # image names must be lowercase
+    messages = first_messages(build_context(project))
+    result = {"success": False, "attempts": 0, "llm_seconds": 0.0, "build_seconds": 0.0, "tag": tag}
+
+    for attempt in range(1, max_attempts + 1):
+        result["attempts"] = attempt
+        print(f"[{attempt}/{max_attempts}] asking {model} ...")
+        reply, stats = ask_model(model, messages)
+        result["llm_seconds"] += stats["seconds"]
+        print(f"    model: {stats['seconds']}s, {stats['tokens']} tokens, {stats['tok_per_s']} tok/s")
+        dockerfile.write_text(extract_dockerfile(reply))
+        messages.append({"role": "assistant", "content": reply})
+
+        print(f"    building {tag} ...")
+        ok, log, build_seconds = docker_build(project, dockerfile, tag)
+        result["build_seconds"] += build_seconds
+        # If Docker itself has died, the failure says nothing about the Dockerfile.
+        if not ok and not docker_ready():
+            raise RuntimeError("Docker stopped responding during the build; restart Docker Desktop")
+        if ok:
+            print(f"    build OK in {build_seconds}s")
+            result["success"] = True
+            break
+        if attempt < max_attempts:
+            print("    build FAILED, sending the error back to the model")
+            # Only the tail of the log: it holds the cause, and a full log can
+            # overflow the context window.
+            messages.append({"role": "user", "content":
+                f"The docker build failed with this error:\n\n{last_lines(log)}\n\n"
+                "Fix the Dockerfile. Reply with only the full corrected Dockerfile."})
+        else:
+            print("    build FAILED, no attempts left")
+            print(last_lines(log, 10))
+
+    result["llm_seconds"] = round(result["llm_seconds"], 1)
+    result["build_seconds"] = round(result["build_seconds"], 1)
+    return result
