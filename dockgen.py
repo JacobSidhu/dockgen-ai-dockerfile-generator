@@ -21,9 +21,9 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 import requests
-
 
 # --- Settings ----------------------------------------------------------------
 
@@ -201,7 +201,7 @@ def extract_dockerfile(reply: str) -> str:
 
 def docker(*args: str, timeout: int = 60) -> subprocess.CompletedProcess:
     """Run a short docker command and capture its output as text."""
-    return subprocess.run(["docker", *args], capture_output=True, text=True,
+    return subprocess.run(["docker", *args], check=False, capture_output=True, text=True,
                           encoding="utf-8", errors="replace", timeout=timeout)
 
 
@@ -226,7 +226,7 @@ def docker_build(project: Path, dockerfile: Path, tag: str,
         # explicit UTF-8 decoding avoids crashes on Windows' default code page.
         proc = subprocess.run(
             ["docker", "build", "--progress=plain", "-f", str(dockerfile), "-t", tag, str(project)],
-            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout,
+            check=False, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout,
         )
     except subprocess.TimeoutExpired:
         return False, f"docker build timed out after {timeout}s", round(time.time() - start, 1)
@@ -274,7 +274,7 @@ def generate(project: Path, model: str = DEFAULT_MODEL, max_attempts: int = MAX_
     dockerfile = project / OUTPUT_NAME
     tag = f"dockgen/{project.resolve().name.lower()}:test"  # image names must be lowercase
     messages = first_messages(build_context(project))
-    result = {"success": False, "attempts": 0, "llm_seconds": 0.0, "build_seconds": 0.0, "tag": tag}
+    result: dict[str, Any] = {"success": False, "attempts": 0, "llm_seconds": 0.0, "build_seconds": 0.0, "tag": tag}
 
     for attempt in range(1, max_attempts + 1):
         result["attempts"] = attempt
