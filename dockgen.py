@@ -5,6 +5,7 @@ fix its own mistakes.
 """
 
 import os
+import re
 import time
 from pathlib import Path
 
@@ -155,3 +156,29 @@ def ask_model(model: str, messages: list[dict]) -> tuple[str, dict]:
         "tok_per_s": round(tokens / gen_seconds, 1) if gen_seconds else 0.0,
     }
     return data["message"]["content"], stats
+
+
+# --- Reply parsing -----------------------------------------------------------
+
+# A fenced code block with any (or no) language tag; non-greedy, so each block
+# is matched on its own.
+FENCE_RE = re.compile(r"```[^\n]*\n(.*?)```", re.DOTALL)
+# A line starting with FROM, the one instruction every Dockerfile has.
+FROM_RE = re.compile(r"^\s*FROM\s", re.MULTILINE | re.IGNORECASE)
+
+
+def extract_dockerfile(reply: str) -> str:
+    """Pull the Dockerfile out of a model reply.
+
+    Small models wrap the answer in prose or include other files, so this
+    takes the first fenced block that contains a FROM line, falls back to
+    everything from the first FROM, and as a last resort returns the reply
+    as-is and lets `docker build` report what's wrong with it.
+    """
+    for block in FENCE_RE.findall(reply):
+        if FROM_RE.search(block):
+            return block.strip() + "\n"
+    match = FROM_RE.search(reply)
+    if match:
+        return reply[match.start():].strip() + "\n"
+    return reply.strip() + "\n"
