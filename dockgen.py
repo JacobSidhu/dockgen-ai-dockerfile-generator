@@ -222,6 +222,29 @@ def docker_build(project: Path, dockerfile: Path, tag: str,
     return proc.returncode == 0, proc.stdout + proc.stderr, round(time.time() - start, 1)
 
 
+def smoke_test(tag: str, wait: int = 5) -> tuple[bool, str]:
+    """Start the image and check the container is still running after `wait` seconds.
+
+    A Dockerfile can build and still be broken (a CMD pointing at a missing
+    file, a USER that doesn't exist), and those containers exit almost at once.
+    Returns whether it stayed up and, if it stopped, the container's logs.
+    """
+    started = docker("run", "-d", tag)
+    if started.returncode != 0:
+        return False, started.stderr.strip()
+    container = started.stdout.strip()
+    try:
+        time.sleep(wait)
+        running = docker("inspect", "-f", "{{.State.Running}}", container).stdout.strip() == "true"
+        if running:
+            return True, ""
+        logs = docker("logs", container)
+        return False, (logs.stdout + logs.stderr).strip()
+    finally:
+        # Always remove the container, including a healthy one that is still serving.
+        docker("rm", "-f", container)
+
+
 # --- Generate, build, retry --------------------------------------------------
 
 def last_lines(text: str, n: int = ERROR_TAIL_LINES) -> str:
