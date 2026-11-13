@@ -3,7 +3,7 @@
 # Docker AI-Powered Generator
 
 Python CLI that generates Dockerfiles with a local LLM (Ollama), builds them, and feeds build errors back to the model to self-correct. Benchmarked on Python, Node and Go projects.
-
+https://github.com/user-attachments/assets/b921d922-10ee-4be4-8a81-4e9607f4aaed
 Example run:
 
 ```
