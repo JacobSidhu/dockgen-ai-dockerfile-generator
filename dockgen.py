@@ -2,11 +2,23 @@
 """
 dockgen: generate a Dockerfile with a local LLM, build it, and let the model
 fix its own mistakes.
+
+The tool describes a project to a model served by Ollama (language, file tree,
+dependency manifest, entry point), writes the Dockerfile it gets back and runs
+`docker build` on it. When the build fails, the end of the build log goes back
+into the same conversation and the model gets another attempt.
+
+Usage:
+    python dockgen.py samples/python-flask --run
+    python dockgen.py path/to/app --model qwen2.5-coder:7b --csv results.csv
 """
 
+import argparse
+import csv
 import os
 import re
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -297,3 +309,101 @@ def generate(project: Path, model: str = DEFAULT_MODEL, max_attempts: int = MAX_
     result["llm_seconds"] = round(result["llm_seconds"], 1)
     result["build_seconds"] = round(result["build_seconds"], 1)
     return result
+
+
+# --- Results -----------------------------------------------------------------
+
+CSV_COLUMNS = ["project", "language", "model", "success", "attempts",
+               "llm_seconds", "build_seconds", "image_mb", "smoke_test"]
+
+
+def image_mb(tag: str) -> float:
+    """Return the image size in MB as Docker reports it, or 0 if it can't be read."""
+    out = docker("image", "inspect", "-f", "{{.Size}}", tag)
+    return round(int(out.stdout.strip()) / 1e6, 1) if out.returncode == 0 else 0.0
+
+
+def append_result(path: Path, row: dict) -> None:
+    """Append one benchmark row to the CSV, writing the header for a new file."""
+    is_new = not path.exists()
+    # newline="" is what the csv module expects; without it Windows gets blank rows.
+    with path.open("a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
+        if is_new:
+            writer.writeheader()
+        writer.writerow(row)
+
+
+# --- Command line ------------------------------------------------------------
+
+def main() -> int:
+    """Parse arguments, run one generate-build-test cycle and return an exit code."""
+    parser = argparse.ArgumentParser(
+        description="Generate a Dockerfile with a local LLM, build it, and self-correct.")
+    parser.add_argument("project", type=Path,
+                        help="folder of the app to containerise")
+    parser.add_argument("--model", default=DEFAULT_MODEL,
+                        help=f"Ollama model (default: {DEFAULT_MODEL})")
+    parser.add_argument("--max-attempts", type=int, default=MAX_ATTEMPTS,
+                        help=f"build tries (default: {MAX_ATTEMPTS})")
+    parser.add_argument("--run", action="store_true",
+                        help="start the built image and check it stays up")
+    parser.add_argument("--show-context", action="store_true",
+                        help="print what the model sees, then stop")
+    parser.add_argument("--csv", type=Path,
+                        help="append a results row to this CSV file")
+    args = parser.parse_args()
+
+    if not args.project.is_dir():
+        parser.error(f"not a folder: {args.project}")
+    if args.show_context:
+        print(build_context(args.project))
+        return 0
+    # Fail fast, before spending a minute on the model.
+    if not docker_ready():
+        print("error: Docker is not running. Start Docker Desktop and try again.", file=sys.stderr)
+        return 1
+
+    try:
+        result = generate(args.project, args.model, args.max_attempts)
+    except (requests.RequestException, RuntimeError, subprocess.TimeoutExpired) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+
+    smoke = "skipped"
+    if result["success"] and args.run:
+        ok, logs = smoke_test(result["tag"])
+        smoke = "pass" if ok else "fail"
+        if ok:
+            print("    smoke test: container is running")
+        else:
+            print(f"    smoke test FAILED, the container stopped:\n{last_lines(logs, 20)}")
+
+    if result["success"] and smoke != "fail":
+        print(f"\nResult: SUCCESS after {result['attempts']} attempt(s)")
+    elif result["success"]:
+        print(f"\nResult: BUILT after {result['attempts']} attempt(s), but the container did not stay up")
+    else:
+        print(f"\nResult: FAILED after {result['attempts']} attempt(s)")
+    print(f"Dockerfile: {args.project / OUTPUT_NAME}")
+
+    if args.csv:
+        append_result(args.csv, {
+            "project": args.project.resolve().name,
+            "language": detect_language(args.project),
+            "model": args.model,
+            "success": result["success"],
+            "attempts": result["attempts"],
+            "llm_seconds": result["llm_seconds"],
+            "build_seconds": result["build_seconds"],
+            "image_mb": image_mb(result["tag"]) if result["success"] else "",
+            "smoke_test": smoke,
+        })
+        print(f"Row added to {args.csv}")
+
+    # Non-zero when the build failed or the container didn't stay up, for scripts and CI.
+    return 0 if result["success"] and smoke != "fail" else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
