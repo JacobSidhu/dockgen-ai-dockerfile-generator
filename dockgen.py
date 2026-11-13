@@ -5,7 +5,10 @@ fix its own mistakes.
 """
 
 import os
+import time
 from pathlib import Path
+
+import requests
 
 
 # --- Settings ----------------------------------------------------------------
@@ -99,3 +102,56 @@ def build_context(project: Path) -> str:
             parts += p.read_text(errors="ignore").splitlines()[:ENTRYPOINT_MAX_LINES]
             break
     return "\n".join(parts)
+
+
+# --- Prompt ------------------------------------------------------------------
+
+# Docker best practices written as rules. This is the biggest lever on output
+# quality, so changes to it should be deliberate and benchmarked.
+SYSTEM_PROMPT = """You are a senior DevOps engineer who writes production-quality Dockerfiles.
+Rules:
+- Use an official, slim or alpine base image with a pinned, currently supported version tag (never :latest).
+- Copy dependency manifests first and install dependencies BEFORE copying the rest of the source, so layer caching works.
+- Use a multi-stage build for compiled languages (Go, Java, Rust) so the final image has no compiler.
+- Run the app as a non-root user.
+- EXPOSE the port the app listens on and set a CMD that starts the app.
+- Do not invent files that are not in the project.
+Reply with ONLY the Dockerfile inside one ```dockerfile code block. No explanation."""
+
+
+# --- Model -------------------------------------------------------------------
+
+def first_messages(context: str) -> list[dict]:
+    """Open the conversation with the rules and the project description."""
+    return [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": "Write a Dockerfile for this project.\n\n" + context},
+    ]
+
+
+def ask_model(model: str, messages: list[dict]) -> tuple[str, dict]:
+    """Send the conversation to Ollama.
+
+    Returns the reply text and timing stats: total seconds (including model
+    load), tokens generated and generation speed in tokens per second.
+    """
+    start = time.time()
+    resp = requests.post(f"{OLLAMA_URL}/api/chat", json={
+        "model": model,
+        "messages": messages,
+        "stream": False,
+        "options": {"temperature": TEMPERATURE, "num_ctx": NUM_CTX},
+    }, timeout=600)
+    if resp.status_code != 200:
+        # Ollama's own message is the useful part: unknown model, out of memory, ...
+        raise RuntimeError(f"Ollama returned an error ({resp.status_code}): {resp.text[:300]}")
+
+    data = resp.json()
+    tokens = data.get("eval_count", 0)
+    gen_seconds = data.get("eval_duration", 0) / 1e9  # reported in nanoseconds
+    stats = {
+        "seconds": round(time.time() - start, 1),
+        "tokens": tokens,
+        "tok_per_s": round(tokens / gen_seconds, 1) if gen_seconds else 0.0,
+    }
+    return data["message"]["content"], stats
