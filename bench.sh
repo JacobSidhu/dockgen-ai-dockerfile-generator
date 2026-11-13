@@ -7,7 +7,7 @@ MODELS="${MODELS:-qwen2.5-coder:3b qwen2.5-coder:7b}"
 RESULTS="results.csv"
 PAUSE=10   # seconds between runs, so memory can settle
 
-cd "$(dirname "$0")"
+cd "$(dirname "$0")" || exit 1
 
 # The project's virtual environment: Scripts/ on Windows, bin/ on Linux and Mac
 if [ -x .venv/Scripts/python ]; then PY=.venv/Scripts/python; else PY=.venv/bin/python; fi
